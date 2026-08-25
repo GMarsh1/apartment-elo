@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Game Tracker & History</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>Game Tracker</h1>
+      <button id="share-btn" class="share-btn">Share Stats</button>
+    </header>
+
+    <!-- Controls & Filters -->
+    <section class="controls-card">
+      <div class="filter-group">
+        <label for="game-filter">Filter by Game:</label>
+        <select id="game-filter">
+          <option value="All">All Games</option>
+          <option value="Chess">Chess</option>
+          <option value="Catan">Catan</option>
+          <option value="Ping Pong">Ping Pong</option>
+        </select>
+      </div>
+
+      <div class="filter-group">
+        <label for="opponent-filter">Opponent Search:</label>
+        <input type="text" id="opponent-filter" placeholder="e.g. Buzz_1927">
+      </div>
+    </section>
+
+    <!-- Head-to-Head Summary -->
+    <section id="h2h-summary" class="summary-card">
+      <h2>Head-to-Head Record</h2>
+      <p id="h2h-stats">Search or select an opponent to see stats.</p>
+    </section>
+
+    <!-- Matches Table -->
+    <section class="history-card">
+      <h2>Match History</h2>
+      <ul id="match-list" class="match-list"></ul>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
