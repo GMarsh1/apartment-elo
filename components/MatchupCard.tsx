@@ -1,185 +1,241 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Player, calculateTeamBettingLines } from '@/lib/elo';
+import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabase';
+import Link from 'next/link';
+import MatchupCard from '@/components/MatchupCard';
 
-interface MatchupProps {
-  availablePlayers: Player[];
-  headToHeadWinsA?: number;
-  headToHeadWinsB?: number;
-}
+export default function Home() {
+  const [games, setGames] = useState<any[]>([]);
+  const [players, setPlayers] = useState<any[]>([]);
+  const [selectedGame, setSelectedGame] = useState<string>('');
+  const [leaderboard, setLeaderboard] = useState<any[]>([]);
+  const [recentMatches, setRecentMatches] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'leaderboard' | 'players' | 'matchup'>('leaderboard');
 
-export default function MatchupCard({
-  availablePlayers,
-  headToHeadWinsA = 0,
-  headToHeadWinsB = 0,
-}: MatchupProps) {
-  const [teamA, setTeamA] = useState<Player[]>(
-    availablePlayers.slice(0, 1)
-  );
-  const [teamB, setTeamB] = useState<Player[]>(
-    availablePlayers.slice(1, 2)
-  );
-  const [copied, setCopied] = useState(false);
+  useEffect(() => { 
+    fetchData(); 
+  }, []);
 
-  const odds = calculateTeamBettingLines(teamA, teamB);
-
-  const togglePlayerA = (player: Player) => {
-    if (teamA.some((p) => p.id === player.id)) {
-      setTeamA(teamA.filter((p) => p.id !== player.id));
-    } else if (teamA.length < 5) {
-      setTeamA([...teamA, player]);
-      setTeamB(teamB.filter((p) => p.id !== player.id));
+  useEffect(() => { 
+    if (selectedGame) {
+      fetchLeaderboard();
+      fetchRecentMatches();
     }
-  };
+  }, [selectedGame]);
 
-  const togglePlayerB = (player: Player) => {
-    if (teamB.some((p) => p.id === player.id)) {
-      setTeamB(teamB.filter((p) => p.id !== player.id));
-    } else if (teamB.length < 5) {
-      setTeamB([...teamB, player]);
-      setTeamA(teamA.filter((p) => p.id !== player.id));
+  async function fetchData() {
+    const { data: g } = await supabase.from('games').select('*');
+    const { data: p } = await supabase.from('players').select('*');
+
+    if (p) setPlayers(p);
+    if (g && g.length > 0) {
+      setGames(g);
+      setSelectedGame(g[0].id);
     }
-  };
+  }
 
-  const nameListA = teamA.map((p) => p.name).join(', ') || 'No Players';
-  const nameListB = teamB.map((p) => p.name).join(', ') || 'No Players';
+  async function fetchLeaderboard() {
+    const { data } = await supabase
+      .from('game_ratings')
+      .select('elo, players(id, name)')
+      .eq('game_id', selectedGame)
+      .order('elo', { ascending: false });
 
-  const shareText = `🔥 UPCOMING MATCHUP:\n` +
-    `🔴 [Team A]: ${nameListA} (Avg ${odds.avgEloA} Elo)\n` +
-    `🔵 [Team B]: ${nameListB} (Avg ${odds.avgEloB} Elo)\n\n` +
-    `📊 Win Probabilities: Team A ${odds.winProbA}% | Team B ${odds.winProbB}%\n` +
-    `💰 Moneyline: Team A (${odds.americanOddsA}) vs Team B (${odds.americanOddsB})\n` +
-    `⚔️ Spread: Team A (${odds.spreadA}) | Team B (${odds.spreadB})\n` +
-    `Check live standings at https://boss-st-elo.vercel.app`;
+    if (data) setLeaderboard(data);
+  }
 
-  const handleShare = async () => {
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: `Matchup: ${nameListA} vs ${nameListB}`,
-          text: shareText,
-          url: window.location.href,
-        });
-      } catch (err) {
-        console.log('Share canceled', err);
-      }
-    } else {
-      await navigator.clipboard.writeText(shareText);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
+  async function fetchRecentMatches() {
+    const { data } = await supabase
+      .from('match_scores')
+      .select('rank, raw_score, elo_change, players(id, name), matches!inner(created_at, game_id)')
+      .eq('matches.game_id', selectedGame)
+      .order('created_at', { ascending: false })
+      .limit(6);
+
+    if (data) setRecentMatches(data);
+  }
 
   return (
-    <div className="max-w-xl mx-auto bg-slate-950/90 text-slate-100 rounded-3xl p-6 shadow-2xl border border-slate-800 space-y-6 backdrop-blur-md">
-      <h2 className="text-xl font-black text-center text-amber-400 uppercase tracking-widest">
-        Matchup Simulator (Up to 5v5)
-      </h2>
+    <main className="min-h-screen bg-pink-50 text-pink-900 p-4 md:p-8">
+      <div className="max-w-3xl mx-auto space-y-6">
+        
+        {/* Header */}
+        <header className="flex justify-between items-center bg-white p-5 rounded-3xl border border-pink-200 shadow-sm shadow-pink-100">
+          <div>
+            <h1 className="text-3xl font-black tracking-tight text-pink-500">
+              BOSS ST ELO
+            </h1>
+            <p className="text-xs text-pink-400 mt-0.5">Apartment Standings & Player Profiles</p>
+          </div>
+          <Link 
+            href="/admin" 
+            className="px-4 py-2 bg-pink-400 hover:bg-pink-500 text-white text-xs font-bold rounded-xl transition shadow-md shadow-pink-200"
+          >
+            + Admin / Log Match
+          </Link>
+        </header>
 
-      <div className="space-y-3 bg-slate-900/80 p-4 rounded-2xl border border-slate-800">
-        <h3 className="text-xs uppercase font-bold text-slate-400 tracking-wider">
-          Assign Roster (Tap A or B to Assign)
-        </h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
-          {availablePlayers.map((player) => {
-            const isA = teamA.some((p) => p.id === player.id);
-            const isB = teamB.some((p) => p.id === player.id);
+        {/* View Tabs */}
+        <div className="flex bg-white p-1.5 rounded-2xl border border-pink-200 shadow-sm gap-1">
+          <button
+            onClick={() => setActiveTab('leaderboard')}
+            className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition ${
+              activeTab === 'leaderboard'
+                ? 'bg-pink-400 text-white shadow-sm'
+                : 'text-pink-400 hover:text-pink-600'
+            }`}
+          >
+            🏆 Game Standings
+          </button>
+          <button
+            onClick={() => setActiveTab('players')}
+            className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition ${
+              activeTab === 'players'
+                ? 'bg-pink-400 text-white shadow-sm'
+                : 'text-pink-400 hover:text-pink-600'
+            }`}
+          >
+            👤 Player Profiles ({players.length})
+          </button>
+          <button
+            onClick={() => setActiveTab('matchup')}
+            className={`flex-1 py-2.5 text-xs font-bold rounded-xl transition ${
+              activeTab === 'matchup'
+                ? 'bg-pink-400 text-white shadow-sm'
+                : 'text-pink-400 hover:text-pink-600'
+            }`}
+          >
+            🎲 Matchup Odds
+          </button>
+        </div>
 
-            return (
-              <div
-                key={player.id}
-                className="flex items-center justify-between bg-slate-800/80 px-3 py-2 rounded-xl text-sm border border-slate-700/50"
-              >
-                <span className="font-semibold truncate">
-                  {player.name} <span className="text-xs text-slate-400">({player.rating})</span>
-                </span>
-                <div className="flex gap-1">
-                  <button
-                    onClick={() => togglePlayerA(player)}
-                    className={`px-2 py-1 rounded-lg text-xs font-bold transition ${
-                      isA ? 'bg-red-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                    }`}
-                  >
-                    Team A
-                  </button>
-                  <button
-                    onClick={() => togglePlayerB(player)}
-                    className={`px-2 py-1 rounded-lg text-xs font-bold transition ${
-                      isB ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
-                    }`}
-                  >
-                    Team B
-                  </button>
+        {activeTab === 'leaderboard' && (
+          <>
+            {/* Game Selector Tabs */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-pink-400 block tracking-wider px-1">
+                Select Game
+              </label>
+              <div className="flex gap-2 overflow-x-auto pb-2 pt-1 scrollbar-thin">
+                {games.length === 0 ? (
+                  <p className="text-sm text-pink-300">No games added yet. Visit Admin to add games!</p>
+                ) : (
+                  games.map((game) => (
+                    <button
+                      key={game.id}
+                      onClick={() => setSelectedGame(game.id)}
+                      className={`px-5 py-2.5 rounded-2xl text-xs font-bold whitespace-nowrap transition-all ${
+                        selectedGame === game.id
+                          ? 'bg-pink-400 text-white shadow-md shadow-pink-200 ring-2 ring-pink-300'
+                          : 'bg-white border border-pink-200 text-pink-500 hover:bg-pink-100/50'
+                      }`}
+                    >
+                      {game.name}
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Standings Table Card */}
+            <div className="bg-white border border-pink-200 rounded-3xl overflow-hidden shadow-sm shadow-pink-100">
+              <div className="p-4 border-b border-pink-200 font-bold text-xs text-pink-400 uppercase tracking-wider flex justify-between bg-pink-100/40">
+                <span>Rank & Player (Click to view profile)</span>
+                <span>Elo Rating</span>
+              </div>
+              <div className="divide-y divide-pink-100">
+                {leaderboard.length === 0 ? (
+                  <p className="p-8 text-center text-pink-300 text-sm">No matches recorded for this game yet.</p>
+                ) : (
+                  leaderboard.map((entry, index) => (
+                    <Link
+                      key={entry.players.id}
+                      href={`/players/${entry.players.id}`}
+                      className="p-4 flex items-center justify-between hover:bg-pink-100/40 transition group cursor-pointer"
+                    >
+                      <div className="flex items-center gap-3.5">
+                        <span className={`w-8 h-8 rounded-full flex items-center justify-center font-extrabold text-xs ${
+                          index === 0 ? 'bg-pink-200 text-pink-700 border border-pink-300' :
+                          index === 1 ? 'bg-pink-100 text-pink-600 border border-pink-200' :
+                          index === 2 ? 'bg-pink-50 text-pink-500 border border-pink-200' : 'text-pink-400 bg-pink-50/50'
+                        }`}>
+                          #{index + 1}
+                        </span>
+                        <span className="font-semibold text-pink-800 text-base group-hover:text-pink-500 transition">
+                          {entry.players.name}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-lg text-pink-500">{entry.elo}</span>
+                        <span className="text-pink-300 group-hover:text-pink-400 text-sm">→</span>
+                      </div>
+                    </Link>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Recent Match Feed */}
+            {recentMatches.length > 0 && (
+              <div className="bg-white border border-pink-200 rounded-3xl p-5 space-y-3 shadow-sm shadow-pink-100">
+                <h3 className="text-xs font-bold uppercase text-pink-400 tracking-wider">Recent Activity</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {recentMatches.map((m, idx) => (
+                    <div key={idx} className="bg-pink-50/50 border border-pink-200 p-3.5 rounded-2xl flex justify-between items-center text-xs">
+                      <div>
+                        <Link href={`/players/${m.players?.id}`} className="font-bold text-pink-800 hover:text-pink-500">
+                          {m.players?.name}
+                        </Link>
+                        <span className="text-pink-400 block text-[11px] mt-0.5">Score: {m.raw_score} (Rank #{m.rank})</span>
+                      </div>
+                      <span className={`font-mono font-bold px-2 py-1 rounded-lg ${
+                        m.elo_change >= 0 ? 'bg-pink-200 text-pink-700' : 'bg-pink-100 text-pink-500'
+                      }`}>
+                        {m.elo_change >= 0 ? `+${m.elo_change}` : m.elo_change} Elo
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
-            );
-          })}
-        </div>
-      </div>
+            )}
+          </>
+        )}
 
-      <div className="grid grid-cols-5 items-center text-center bg-slate-900 p-4 rounded-2xl border border-slate-800">
-        <div className="col-span-2">
-          <span className="text-xs font-bold uppercase text-red-400">Team A</span>
-          <p className="font-extrabold text-base truncate">{nameListA}</p>
-          <span className="text-xs text-slate-400">{odds.avgEloA} Avg Elo</span>
-        </div>
-        <div className="col-span-1 font-black text-amber-400 text-lg">VS</div>
-        <div className="col-span-2">
-          <span className="text-xs font-bold uppercase text-blue-400">Team B</span>
-          <p className="font-extrabold text-base truncate">{nameListB}</p>
-          <span className="text-xs text-slate-400">{odds.avgEloB} Avg Elo</span>
-        </div>
-      </div>
-
-      <div>
-        <div className="flex justify-between text-xs font-semibold mb-1">
-          <span className="text-red-400">Team A {odds.winProbA}%</span>
-          <span className="text-blue-400">Team B {odds.winProbB}%</span>
-        </div>
-        <div className="w-full bg-blue-900/60 h-4 rounded-full overflow-hidden flex border border-slate-700">
-          <div
-            className="bg-red-600 h-full transition-all duration-500"
-            style={{ width: `${odds.winProbA}%` }}
-          />
-        </div>
-      </div>
-
-      <div className="bg-slate-900 rounded-2xl p-4 space-y-3 text-sm border border-slate-800">
-        <h4 className="font-bold text-slate-400 text-xs uppercase tracking-wider text-center">
-          Vegas Odds & Lines
-        </h4>
-        <div className="grid grid-cols-3 gap-2 text-center items-center">
-          <span className="text-slate-400 text-xs text-left">Market</span>
-          <span className="font-bold text-red-400">Team A</span>
-          <span className="font-bold text-blue-400">Team B</span>
-
-          <span className="text-slate-400 text-xs text-left">Moneyline</span>
-          <span className="text-emerald-400 font-bold">{odds.americanOddsA}</span>
-          <span className="text-emerald-400 font-bold">{odds.americanOddsB}</span>
-
-          <span className="text-slate-400 text-xs text-left">Spread</span>
-          <span className="text-amber-300 font-semibold">{odds.spreadA}</span>
-          <span className="text-amber-300 font-semibold">{odds.spreadB}</span>
-        </div>
-      </div>
-
-      {headToHeadWinsA + headToHeadWinsB > 0 && (
-        <div className="border-t border-slate-800 pt-4 text-center">
-          <span className="text-xs uppercase text-slate-400 tracking-wider">H2H Series Record</span>
-          <div className="text-xl font-black mt-1">
-            {headToHeadWinsA} - {headToHeadWinsB}
+        {activeTab === 'players' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {players.length === 0 ? (
+              <div className="col-span-2 bg-white p-8 rounded-3xl border border-pink-200 text-center text-pink-300 text-sm">
+                No players added yet. Go to Admin to add your roommates!
+              </div>
+            ) : (
+              players.map((p) => (
+                <Link
+                  key={p.id}
+                  href={`/players/${p.id}`}
+                  className="bg-white border border-pink-200 p-5 rounded-3xl flex items-center justify-between hover:border-pink-300 hover:shadow-md transition group"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-pink-100 text-pink-500 font-bold flex items-center justify-center text-base">
+                      {p.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-pink-800 group-hover:text-pink-500 transition">{p.name}</h4>
+                      <p className="text-xs text-pink-400">View performance stats</p>
+                    </div>
+                  </div>
+                  <span className="text-pink-400 font-bold text-sm">View Profile →</span>
+                </Link>
+              ))
+            )}
           </div>
-        </div>
-      )}
+        )}
 
-      <button
-        onClick={handleShare}
-        className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-3.5 rounded-2xl transition flex items-center justify-center gap-2 shadow-lg shadow-indigo-950 active:scale-95 border border-indigo-500/30"
-      >
-        <span>📲</span>
-        <span>{copied ? 'Copied to Clipboard!' : 'Share Odds to Group Chat'}</span>
-      </button>
-    </div>
+        {activeTab === 'matchup' && (
+          <MatchupCard players={players} leaderboard={leaderboard} />
+        )}
+
+      </div>
+    </main>
   );
 }

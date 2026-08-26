@@ -1,92 +1,96 @@
-export interface Player {
-  id: string;
-  name: string;
-  rating: number;
+type TeamResult = {
+  teamId: number;
+  playerIds: string[];
+  rawScore: number;
+};
+
+export function getWinProbability(ratingA: number, ratingB: number): number {
+  return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400));
 }
 
-export interface EloChangeResult {
-  newWinnerRating: number;
-  newLoserRating: number;
-  change: number;
-  [key: string]: number; // Allows string indexing safely for TypeScript
+export function probabilityToMoneyline(prob: number): string {
+  if (prob >= 0.5) {
+    const odds = Math.round((-100 * prob) / (1 - prob));
+    return `${odds}`;
+  } else {
+    const odds = Math.round((100 * (1 - prob)) / prob);
+    return `+${odds}`;
+  }
 }
 
-// Calculates standard 1v1 Elo change after a match
+export function calculateTeamBettingLines(team1Elos: number[], team2Elos: number[]) {
+  const avgTeam1 = team1Elos.length ? team1Elos.reduce((a, b) => a + b, 0) / team1Elos.length : 1200;
+  const avgTeam2 = team2Elos.length ? team2Elos.reduce((a, b) => a + b, 0) / team2Elos.length : 1200;
+
+  const team1WinProb = getWinProbability(avgTeam1, avgTeam2);
+  const team2WinProb = 1 - team1WinProb;
+
+  return {
+    team1AvgElo: Math.round(avgTeam1),
+    team2AvgElo: Math.round(avgTeam2),
+    team1WinProbability: team1WinProb,
+    team2WinProbability: team2WinProb,
+    team1Moneyline: probabilityToMoneyline(team1WinProb),
+    team2Moneyline: probabilityToMoneyline(team2WinProb),
+  };
+}
+
 export function calculateEloChanges(
-  winnerRating: number,
-  loserRating: number,
+  teams: TeamResult[],
+  currentElos: Record<string, number>,
+  scoringType: 'high_score_wins' | 'low_score_wins',
   kFactor: number = 32
-): EloChangeResult {
-  const expectedWinner = 1 / (1 + Math.pow(10, (loserRating - winnerRating) / 400));
-  const change = Math.round(kFactor * (1 - expectedWinner));
+): Record<string, { rank: number; eloChange: number }> {
+  const sortedTeams = [...teams].sort((a, b) => 
+    scoringType === 'high_score_wins' ? b.rawScore - a.rawScore : a.rawScore - b.rawScore
+  );
 
-  return {
-    newWinnerRating: winnerRating + change,
-    newLoserRating: loserRating - change,
-    change,
-  };
-}
+  const teamRanks: Record<number, number> = {};
+  let currentRank = 1;
+  sortedTeams.forEach((team, index) => {
+    if (index > 0 && team.rawScore === sortedTeams[index - 1].rawScore) {
+      teamRanks[team.teamId] = teamRanks[sortedTeams[index - 1].teamId];
+    } else {
+      teamRanks[team.teamId] = currentRank;
+    }
+    currentRank++;
+  });
 
-// Calculates expected win probability for Team A vs Team B (supports 1v1 up to 5v5)
-export function getTeamWinProbability(teamA: Player[], teamB: Player[]): number {
-  if (teamA.length === 0 || teamB.length === 0) return 0.5;
+  const teamElos: Record<number, number> = {};
+  teams.forEach(t => {
+    const avg = t.playerIds.reduce((sum, id) => sum + (currentElos[id] || 1200), 0) / t.playerIds.length;
+    teamElos[t.teamId] = avg;
+  });
 
-  const avgRatingA = teamA.reduce((sum, p) => sum + p.rating, 0) / teamA.length;
-  const avgRatingB = teamB.reduce((sum, p) => sum + p.rating, 0) / teamB.length;
+  const playerResults: Record<string, { rank: number; eloChange: number }> = {};
 
-  return 1 / (1 + Math.pow(10, (avgRatingB - avgRatingA) / 400));
-}
+  teams.forEach(teamA => {
+    let totalEloChange = 0;
 
-export interface BettingLine {
-  winProbA: number;
-  winProbB: number;
-  americanOddsA: string;
-  americanOddsB: string;
-  decimalOddsA: number;
-  decimalOddsB: number;
-  spreadA: string;
-  spreadB: string;
-  avgEloA: number;
-  avgEloB: number;
-}
+    teams.forEach(teamB => {
+      if (teamA.teamId === teamB.teamId) return;
 
-export function calculateTeamBettingLines(teamA: Player[], teamB: Player[]): BettingLine {
-  const probA = getTeamWinProbability(teamA, teamB);
-  const probB = 1 - probA;
+      const ratingA = teamElos[teamA.teamId];
+      const ratingB = teamElos[teamB.teamId];
 
-  const avgEloA = teamA.length > 0 
-    ? Math.round(teamA.reduce((sum, p) => sum + p.rating, 0) / teamA.length) 
-    : 1200;
-  const avgEloB = teamB.length > 0 
-    ? Math.round(teamB.reduce((sum, p) => sum + p.rating, 0) / teamB.length) 
-    : 1200;
+      const expectedA = getWinProbability(ratingA, ratingB);
 
-  const decA = Number((1 / Math.max(probA, 0.01)).toFixed(2));
-  const decB = Number((1 / Math.max(probB, 0.01)).toFixed(2));
+      let actualA = 0.5;
+      if (teamRanks[teamA.teamId] < teamRanks[teamB.teamId]) actualA = 1;
+      else if (teamRanks[teamA.teamId] > teamRanks[teamB.teamId]) actualA = 0;
 
-  const amA = probA >= 0.5 
-    ? `-${Math.round((probA / (1 - probA)) * 100)}`
-    : `+${Math.round(((1 - probA) / probA) * 100)}`;
+      totalEloChange += kFactor * (actualA - expectedA);
+    });
 
-  const amB = probB >= 0.5 
-    ? `-${Math.round((probB / (1 - probB)) * 100)}`
-    : `+${Math.round(((1 - probB) / probB) * 100)}`;
+    const avgTeamChange = Math.round(totalEloChange / (teams.length - 1));
 
-  const eloDiff = avgEloA - avgEloB;
-  const spreadValue = Number((eloDiff / 28.5).toFixed(1));
-  const spreadA = spreadValue > 0 ? `-${spreadValue}` : `+${Math.abs(spreadValue)}`;
-  const spreadB = spreadValue > 0 ? `+${spreadValue}` : `-${Math.abs(spreadValue)}`;
+    teamA.playerIds.forEach(pId => {
+      playerResults[pId] = {
+        rank: teamRanks[teamA.teamId],
+        eloChange: avgTeamChange
+      };
+    });
+  });
 
-  return {
-    winProbA: Math.round(probA * 100),
-    winProbB: Math.round(probB * 100),
-    americanOddsA: amA,
-    americanOddsB: amB,
-    decimalOddsA: decA,
-    decimalOddsB: decB,
-    spreadA,
-    spreadB,
-    avgEloA,
-    avgEloB,
-  };
+  return playerResults;
 }
