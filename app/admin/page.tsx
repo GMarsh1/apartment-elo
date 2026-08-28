@@ -4,24 +4,27 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import Link from 'next/link';
 import AdminMatchManager from '@/components/AdminMatchManager';
+import { calculateEloChanges, ScoringType, TeamInput } from '@/lib/elo';
+
+interface TeamState {
+  players: string[];
+  score: string;
+}
 
 export default function AdminPage() {
   const [games, setGames] = useState<any[]>([]);
   const [players, setPlayers] = useState<any[]>([]);
   const [selectedGame, setSelectedGame] = useState<string>('');
+  const [scoringType, setScoringType] = useState<ScoringType>('high_score_wins');
   const [refreshKey, setRefreshKey] = useState<number>(0);
 
-  // Inputs for adding games/players
   const [newGameName, setNewGameName] = useState<string>('');
   const [newPlayerName, setNewPlayerName] = useState<string>('');
 
-  // Team Assignments (Array of player IDs for each team)
-  const [team1Players, setTeam1Players] = useState<string[]>(['']);
-  const [team2Players, setTeam2Players] = useState<string[]>(['']);
-
-  // Scores per team
-  const [team1Score, setTeam1Score] = useState<string>('');
-  const [team2Score, setTeam2Score] = useState<string>('');
+  const [teams, setTeams] = useState<TeamState[]>([
+    { players: [''], score: '' },
+    { players: [''], score: '' },
+  ]);
 
   useEffect(() => {
     fetchData();
@@ -35,41 +38,55 @@ export default function AdminPage() {
       setGames(g);
       setSelectedGame((prev) => prev || g[0].id);
     }
-    if (p && p.length >= 2) {
+    if (p) {
       setPlayers(p);
-      setTeam1Players([p[0].id]);
-      setTeam2Players([p[1].id]);
-    } else if (p) {
-      setPlayers(p);
+      if (p.length >= 2) {
+        setTeams([
+          { players: [p[0].id], score: '' },
+          { players: [p[1].id], score: '' },
+        ]);
+      }
     }
   }
 
-  // Helpers to adjust dynamic team sizes (up to 3 players per team)
-  function handleAddTeamPlayer(team: 1 | 2) {
-    const setTeam = team === 1 ? setTeam1Players : setTeam2Players;
-    const currentTeam = team === 1 ? team1Players : team2Players;
-
-    if (currentTeam.length < 3) {
-      const allSelected = new Set([...team1Players, ...team2Players]);
-      const unused = players.find((p) => !allSelected.has(p.id));
-      setTeam([...currentTeam, unused ? unused.id : '']);
+  function handleAddTeam() {
+    if (teams.length < 4) {
+      setTeams([...teams, { players: [''], score: '' }]);
     }
   }
 
-  function handleRemoveTeamPlayer(team: 1 | 2, index: number) {
-    const setTeam = team === 1 ? setTeam1Players : setTeam2Players;
-    const currentTeam = team === 1 ? team1Players : team2Players;
-
-    if (currentTeam.length > 1) {
-      setTeam(currentTeam.filter((_, i) => i !== index));
+  function handleRemoveTeam(teamIndex: number) {
+    if (teams.length > 2) {
+      setTeams(teams.filter((_, i) => i !== teamIndex));
     }
   }
 
-  function handleUpdatePlayer(team: 1 | 2, index: number, value: string) {
-    const setTeam = team === 1 ? setTeam1Players : setTeam2Players;
-    const currentTeam = team === 1 ? [...team1Players] : [...team2Players];
-    currentTeam[index] = value;
-    setTeam(currentTeam);
+  function handleAddPlayerToTeam(teamIndex: number) {
+    const updated = [...teams];
+    if (updated[teamIndex].players.length < 3) {
+      updated[teamIndex].players.push('');
+      setTeams(updated);
+    }
+  }
+
+  function handleRemovePlayerFromTeam(teamIndex: number, playerIndex: number) {
+    const updated = [...teams];
+    if (updated[teamIndex].players.length > 1) {
+      updated[teamIndex].players = updated[teamIndex].players.filter((_, i) => i !== playerIndex);
+      setTeams(updated);
+    }
+  }
+
+  function handleUpdatePlayer(teamIndex: number, playerIndex: number, value: string) {
+    const updated = [...teams];
+    updated[teamIndex].players[playerIndex] = value;
+    setTeams(updated);
+  }
+
+  function handleUpdateScore(teamIndex: number, value: string) {
+    const updated = [...teams];
+    updated[teamIndex].score = value;
+    setTeams(updated);
   }
 
   async function handleAddGame(e: React.FormEvent) {
@@ -101,57 +118,54 @@ export default function AdminPage() {
   async function handleLogMatch(e: React.FormEvent) {
     e.preventDefault();
 
-    const activeT1 = team1Players.filter((id) => id);
-    const activeT2 = team2Players.filter((id) => id);
+    const activeTeams = teams.map((t) => ({
+      players: t.players.filter((id) => id !== ''),
+      score: parseFloat(t.score),
+    }));
 
-    if (activeT1.length === 0 || activeT2.length === 0) {
-      alert('Both teams must have at least one player.');
+    for (let i = 0; i < activeTeams.length; i++) {
+      if (activeTeams[i].players.length === 0) {
+        alert(`Team ${i + 1} must have at least one player selected.`);
+        return;
+      }
+      if (isNaN(activeTeams[i].score)) {
+        alert(`Please enter a valid numeric score for Team ${i + 1}.`);
+        return;
+      }
+    }
+
+    const allPlayerIds = activeTeams.flatMap((t) => t.players);
+    if (new Set(allPlayerIds).size !== allPlayerIds.length) {
+      alert('A player cannot be selected multiple times across teams.');
       return;
     }
 
-    const allSelected = [...activeT1, ...activeT2];
-    if (new Set(allSelected).size !== allSelected.length) {
-      alert('A player cannot be on both teams or selected multiple times.');
+    // A. Fetch current ratings & matches_played for all participating players
+    const { data: playerData, error: pError } = await supabase
+      .from('players')
+      .select('id, elo, matches_played')
+      .in('id', allPlayerIds);
+
+    if (pError || !playerData) {
+      alert('Error fetching player ratings: ' + pError?.message);
       return;
     }
 
-    const s1 = parseFloat(team1Score);
-    const s2 = parseFloat(team2Score);
+    // B. Build lookup maps
+    const ratingMap = new Map<string, number>(playerData.map((p) => [p.id, p.elo ?? 1000]));
+    const matchCountMap = new Map<string, number>(playerData.map((p) => [p.id, p.matches_played ?? 0]));
 
-    if (isNaN(s1) || isNaN(s2)) {
-      alert('Please enter valid numerical scores for both teams.');
-      return;
-    }
+    const eloInputs: TeamInput[] = activeTeams.map((t, idx) => ({
+      id: idx,
+      playerIds: t.players,
+      rawScore: t.score,
+    }));
 
-    // Determine ranks
-    const rank1 = s1 > s2 ? 1 : s1 < s2 ? 2 : 1;
-    const rank2 = s2 > s1 ? 1 : s2 < s1 ? 2 : 1;
+    // C. Calculate dynamic Elo changes passing match counts
+    const calculated = calculateEloChanges(eloInputs, scoringType, ratingMap, matchCountMap);
+    const results = Array.isArray(calculated) ? calculated : Object.values(calculated);
 
-    // Fetch existing ratings
-    const { data: ratingsData } = await supabase
-      .from('game_ratings')
-      .select('player_id, elo')
-      .eq('game_id', selectedGame)
-      .in('player_id', allSelected);
-
-    const ratingMap = new Map<string, number>();
-    ratingsData?.forEach((row) => ratingMap.set(row.player_id, row.elo));
-
-    // Calculate Team Average Elos
-    const avgElo1 = activeT1.reduce((sum, id) => sum + (ratingMap.get(id) ?? 1000), 0) / activeT1.length;
-    const avgElo2 = activeT2.reduce((sum, id) => sum + (ratingMap.get(id) ?? 1000), 0) / activeT2.length;
-
-    // Standard Team Elo
-    const expected1 = 1 / (1 + Math.pow(10, (avgElo2 - avgElo1) / 400));
-    const expected2 = 1 / (1 + Math.pow(10, (avgElo1 - avgElo2) / 400));
-
-    const actual1 = s1 > s2 ? 1 : s1 === s2 ? 0.5 : 0;
-    const actual2 = s2 > s1 ? 1 : s1 === s2 ? 0.5 : 0;
-
-    const eloChange1 = Math.round(32 * (actual1 - expected1));
-    const eloChange2 = Math.round(32 * (actual2 - expected2));
-
-    // Create Match Record
+    // D. Insert match record
     const { data: matchData, error: matchError } = await supabase
       .from('matches')
       .insert([{ game_id: selectedGame }])
@@ -163,228 +177,271 @@ export default function AdminPage() {
       return;
     }
 
-    // Prepare Score Entries
-    const scoresToInsert = [
-      ...activeT1.map((playerId) => ({
-        match_id: matchData.id,
-        player_id: playerId,
-        rank: rank1,
-        raw_score: s1,
-        elo_change: eloChange1,
-        team: 1,
-      })),
-      ...activeT2.map((playerId) => ({
-        match_id: matchData.id,
-        player_id: playerId,
-        rank: rank2,
-        raw_score: s2,
-        elo_change: eloChange2,
-        team: 2,
-      })),
-    ];
+    const scoresToInsert: any[] = [];
+    const playerUpdatesMap = new Map<string, { elo: number; matches_played: number }>();
 
-    await supabase.from('match_scores').insert(scoresToInsert);
+    results.forEach((res: any, teamIdx: number) => {
+      const team = activeTeams[teamIdx];
+      if (!team) return;
 
-    // Upsert individual player ratings
-    const ratingsToUpsert = [
-      ...activeT1.map((playerId) => ({
-        game_id: selectedGame,
-        player_id: playerId,
-        elo: (ratingMap.get(playerId) ?? 1000) + eloChange1,
-      })),
-      ...activeT2.map((playerId) => ({
-        game_id: selectedGame,
-        player_id: playerId,
-        elo: (ratingMap.get(playerId) ?? 1000) + eloChange2,
-      })),
-    ];
+      const currentTeamId = Number(teamIdx + 1);
 
-    await supabase.from('game_ratings').upsert(ratingsToUpsert);
+      team.players.forEach((playerId) => {
+        scoresToInsert.push({
+          match_id: matchData.id,
+          player_id: playerId,
+          rank: res.rank ?? 1,
+          raw_score: res.rawScore ?? team.score,
+          elo_change: res.eloChangePerPlayer ?? 0,
+          team_id: currentTeamId,
+        });
 
-    alert('Match logged successfully!');
-    setTeam1Score('');
-    setTeam2Score('');
+        const currentElo = ratingMap.get(playerId) ?? 1000;
+        const currentMatches = matchCountMap.get(playerId) ?? 0;
+
+        playerUpdatesMap.set(playerId, {
+          elo: currentElo + (res.eloChangePerPlayer ?? 0),
+          matches_played: currentMatches + 1,
+        });
+      });
+    });
+
+    const { error: scoreError } = await supabase.from('match_scores').insert(scoresToInsert);
+    if (scoreError) {
+      alert('Error saving match scores: ' + scoreError.message);
+      return;
+    }
+
+    // E. Update each player's Elo rating AND increment matches_played count
+    for (const [pId, updates] of Array.from(playerUpdatesMap.entries())) {
+      const { error: updateError } = await supabase
+        .from('players')
+        .update({
+          elo: updates.elo,
+          matches_played: updates.matches_played,
+        })
+        .eq('id', pId);
+
+      if (updateError) {
+        alert(`Error updating player stats for ${pId}: ` + updateError.message);
+        return;
+      }
+    }
+
+    alert('Match logged successfully! Ratings updated and matches played incremented.');
+
+    setTeams(teams.map((t) => ({ ...t, score: '' })));
     setRefreshKey((prev) => prev + 1);
   }
 
-  const allChosen = new Set([...team1Players, ...team2Players]);
+  const allChosen = new Set(teams.flatMap((t) => t.players).filter(Boolean));
 
   return (
-    <main className="min-h-screen bg-pink-50 text-pink-900 p-4 md:p-8">
-      <div className="max-w-2xl mx-auto space-y-6">
-        <Link href="/" className="text-xs font-bold text-pink-400 hover:text-pink-600 transition inline-block">
-          ← Back to Standings
-        </Link>
-
-        <header className="bg-white p-6 rounded-3xl border border-pink-200 shadow-sm">
-          <h1 className="text-2xl font-black text-pink-500">ADMIN CONTROL CENTER</h1>
-          <p className="text-xs text-pink-400 mt-1">Add games, register roommates, and log match scores.</p>
-        </header>
-
-        {/* Form: Add New Game & Add New Player */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <form onSubmit={handleAddGame} className="bg-white border border-pink-200 p-5 rounded-3xl space-y-3 shadow-sm">
-            <h3 className="text-xs font-bold uppercase text-pink-400 tracking-wider">+ Add New Game</h3>
-            <input
-              type="text"
-              placeholder="e.g. Smash Bros, Pool"
-              value={newGameName}
-              onChange={(e) => setNewGameName(e.target.value)}
-              className="w-full bg-pink-50 border border-pink-200 rounded-xl p-2.5 text-xs font-bold text-pink-800 placeholder-pink-300"
-            />
-            <button type="submit" className="w-full bg-pink-400 hover:bg-pink-500 text-white text-xs font-bold py-2.5 rounded-xl transition">
-              Add Game
-            </button>
-          </form>
-
-          <form onSubmit={handleAddPlayer} className="bg-white border border-pink-200 p-5 rounded-3xl space-y-3 shadow-sm">
-            <h3 className="text-xs font-bold uppercase text-pink-400 tracking-wider">+ Add New Player</h3>
-            <input
-              type="text"
-              placeholder="Roommate Name"
-              value={newPlayerName}
-              onChange={(e) => setNewPlayerName(e.target.value)}
-              className="w-full bg-pink-50 border border-pink-200 rounded-xl p-2.5 text-xs font-bold text-pink-800 placeholder-pink-300"
-            />
-            <button type="submit" className="w-full bg-pink-400 hover:bg-pink-500 text-white text-xs font-bold py-2.5 rounded-xl transition">
-              Add Player
-            </button>
-          </form>
+    <main style={{ minHeight: '100vh', backgroundColor: '#fff1f2', color: '#831843', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
+      <div style={{ maxWidth: '768px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+        
+        {/* Navigation & Header */}
+        <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '24px', border: '1px solid #fbcfe8', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.08)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <Link href="/" style={{ fontSize: '0.75rem', fontWeight: 700, color: '#ec4899', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px', marginBottom: '4px' }}>
+              <span>←</span> Back to Standings
+            </Link>
+            <h1 style={{ fontSize: '1.75rem', fontWeight: 900, margin: 0, color: '#ec4899', letterSpacing: '-0.025em' }}>
+              ⚡ Admin Control Center
+            </h1>
+            <p style={{ fontSize: '0.75rem', color: '#f472b6', margin: '2px 0 0 0' }}>Configure your roster, register categories, and submit live match results.</p>
+          </div>
+          <div style={{ backgroundColor: '#fdf2f8', border: '1px solid #fbcfe8', padding: '6px 12px', borderRadius: '12px', color: '#db2777', fontSize: '0.75rem', fontWeight: 700 }}>
+            System Active
+          </div>
         </div>
 
-        {/* Form: Log Match Outcome (Team 1 vs Team 2 Column View) */}
-        <form onSubmit={handleLogMatch} className="bg-white border border-pink-200 p-6 rounded-3xl space-y-4 shadow-sm">
-          <h3 className="text-sm font-black text-pink-800">🎮 Log Match Result</h3>
+        {/* Setup Grid: Add Games & Players */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
+          
+          <form onSubmit={handleAddGame} style={{ backgroundColor: '#ffffff', border: '1px solid #fbcfe8', padding: '20px', borderRadius: '24px', display: 'flex', flexDirection: 'column', gap: '12px', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)' }}>
+            <div>
+              <span style={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#ec4899', backgroundColor: '#fdf2f8', padding: '2px 6px', borderRadius: '6px' }}>Catalog</span>
+              <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#831843', margin: '6px 0 2px 0' }}>Add New Game</h3>
+              <p style={{ fontSize: '0.7rem', color: '#f472b6', margin: 0 }}>Create a tracking board (e.g. Golf, Smash, Catan)</p>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                placeholder="Game title..."
+                value={newGameName}
+                onChange={(e) => setNewGameName(e.target.value)}
+                style={{ flex: 1, backgroundColor: '#fff1f2', border: '1px solid #fbcfe8', borderRadius: '12px', padding: '10px 14px', fontSize: '0.875rem', color: '#831843', outline: 'none' }}
+              />
+              <button type="submit" style={{ backgroundColor: '#f472b6', color: '#ffffff', fontWeight: 700, fontSize: '0.75rem', padding: '10px 16px', borderRadius: '12px', border: 'none', cursor: 'pointer', boxShadow: '0 2px 6px rgba(244, 114, 182, 0.3)' }}>
+                Add Game
+              </button>
+            </div>
+          </form>
 
-          <div>
-            <label className="text-[10px] font-bold text-pink-400 uppercase">Select Game</label>
-            <select
-              value={selectedGame}
-              onChange={(e) => setSelectedGame(e.target.value)}
-              className="w-full bg-pink-50 border border-pink-200 rounded-xl p-2.5 text-xs font-bold text-pink-800 mt-1"
-            >
-              {games.map((g) => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
+          <form onSubmit={handleAddPlayer} style={{ backgroundColor: '#ffffff', border: '1px solid #fbcfe8', padding: '20px', borderRadius: '24px', display: 'flex', flexDirection: 'column', gap: '12px', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)' }}>
+            <div>
+              <span style={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#059669', backgroundColor: '#ecfdf5', padding: '2px 6px', borderRadius: '6px' }}>Roster</span>
+              <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#831843', margin: '6px 0 2px 0' }}>Add New Player</h3>
+              <p style={{ fontSize: '0.7rem', color: '#f472b6', margin: 0 }}>Register a participant into the system</p>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                placeholder="Player name..."
+                value={newPlayerName}
+                onChange={(e) => setNewPlayerName(e.target.value)}
+                style={{ flex: 1, backgroundColor: '#fff1f2', border: '1px solid #fbcfe8', borderRadius: '12px', padding: '10px 14px', fontSize: '0.875rem', color: '#831843', outline: 'none' }}
+              />
+              <button type="submit" style={{ backgroundColor: '#10b981', color: '#ffffff', fontWeight: 700, fontSize: '0.75rem', padding: '10px 16px', borderRadius: '12px', border: 'none', cursor: 'pointer', boxShadow: '0 2px 6px rgba(16, 185, 129, 0.3)' }}>
+                Add Player
+              </button>
+            </div>
+          </form>
+
+        </div>
+
+        {/* Log Match Section */}
+        <form onSubmit={handleLogMatch} style={{ backgroundColor: '#ffffff', border: '1px solid #fbcfe8', padding: '24px', borderRadius: '24px', display: 'flex', flexDirection: 'column', gap: '20px', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)' }}>
+          <div style={{ borderBottom: '1px solid #fbcfe8', paddingBottom: '16px' }}>
+            <h2 style={{ fontSize: '1.125rem', fontWeight: 800, color: '#831843', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span>🏆</span> Log Match Outcome
+            </h2>
+            <p style={{ fontSize: '0.75rem', color: '#f472b6', margin: '2px 0 0 0' }}>Record lineup matchups and scores to execute automatic Elo calculations.</p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Team 1 Column */}
-            <div className="bg-pink-50/50 p-4 rounded-2xl border border-pink-100 space-y-3">
-              <h4 className="text-xs font-black text-pink-700 uppercase tracking-wider">TEAM 1</h4>
-              
-              {team1Players.map((pId, idx) => (
-                <div key={idx} className="flex items-center gap-2">
-                  <select
-                    value={pId}
-                    onChange={(e) => handleUpdatePlayer(1, idx, e.target.value)}
-                    className="w-full bg-white border border-pink-200 rounded-xl p-2 text-xs font-bold text-pink-800"
-                  >
-                    <option value="">Select Player</option>
-                    {players.map((p) => (
-                      <option key={p.id} value={p.id} disabled={allChosen.has(p.id) && p.id !== pId}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  {team1Players.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveTeamPlayer(1, idx)}
-                      className="text-xs font-bold text-pink-400 hover:text-pink-600 px-1"
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              ))}
-
-              {team1Players.length < 3 && (
-                <button
-                  type="button"
-                  onClick={() => handleAddTeamPlayer(1)}
-                  className="text-[10px] font-bold text-pink-500 hover:underline block"
-                >
-                  + Add Teammate
-                </button>
-              )}
-
-              <div>
-                <label className="text-[10px] font-bold text-pink-400 uppercase block mt-2">Team 1 Score</label>
-                <input
-                  type="number"
-                  placeholder="Score"
-                  value={team1Score}
-                  onChange={(e) => setTeam1Score(e.target.value)}
-                  className="w-full bg-white border border-pink-200 rounded-xl p-2 text-xs font-bold text-pink-800 mt-1"
-                />
-              </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px' }}>
+            <div>
+              <label style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', color: '#f472b6', letterSpacing: '0.05em', display: 'block', marginBottom: '6px' }}>Select Game Mode</label>
+              <select
+                value={selectedGame}
+                onChange={(e) => setSelectedGame(e.target.value)}
+                style={{ width: '100%', backgroundColor: '#fff1f2', border: '1px solid #fbcfe8', borderRadius: '12px', padding: '12px', fontSize: '0.875rem', fontWeight: 700, color: '#831843', outline: 'none' }}
+              >
+                {games.map((g) => (
+                  <option key={g.id} value={g.id}>{g.name}</option>
+                ))}
+              </select>
             </div>
 
-            {/* Team 2 Column */}
-            <div className="bg-pink-50/50 p-4 rounded-2xl border border-pink-100 space-y-3">
-              <h4 className="text-xs font-black text-pink-700 uppercase tracking-wider">TEAM 2</h4>
+            <div>
+              <label style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', color: '#f472b6', letterSpacing: '0.05em', display: 'block', marginBottom: '6px' }}>Scoring Mechanic</label>
+              <select
+                value={scoringType}
+                onChange={(e) => setScoringType(e.target.value as ScoringType)}
+                style={{ width: '100%', backgroundColor: '#fff1f2', border: '1px solid #fbcfe8', borderRadius: '12px', padding: '12px', fontSize: '0.875rem', fontWeight: 700, color: '#831843', outline: 'none' }}
+              >
+                <option value="high_score_wins">High Score Wins (Points, Kills)</option>
+                <option value="low_score_wins">Low Score Wins (Golf Strokes, Time)</option>
+              </select>
+            </div>
+          </div>
 
-              {team2Players.map((pId, idx) => (
-                <div key={idx} className="flex items-center gap-2">
-                  <select
-                    value={pId}
-                    onChange={(e) => handleUpdatePlayer(2, idx, e.target.value)}
-                    className="w-full bg-white border border-pink-200 rounded-xl p-2 text-xs font-bold text-pink-800"
-                  >
-                    <option value="">Select Player</option>
-                    {players.map((p) => (
-                      <option key={p.id} value={p.id} disabled={allChosen.has(p.id) && p.id !== pId}>
-                        {p.name}
-                      </option>
+          {/* Teams Container */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', color: '#f472b6', letterSpacing: '0.05em' }}>Active Lineups</label>
+              <span style={{ fontSize: '0.7rem', color: '#f472b6' }}>Up to 4 teams supported</span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
+              {teams.map((team, teamIdx) => (
+                <div key={teamIdx} style={{ backgroundColor: '#fff1f2', padding: '16px', borderRadius: '16px', border: '1px solid #fbcfe8', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #fce7f3', paddingBottom: '8px' }}>
+                    <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#ec4899', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#ec4899', display: 'inline-block' }}></span>
+                      Team {teamIdx + 1}
+                    </span>
+                    {teams.length > 2 && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveTeam(teamIdx)}
+                        style={{ background: 'none', border: 'none', fontSize: '0.75rem', fontWeight: 700, color: '#e11d48', cursor: 'pointer' }}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {team.players.map((pId, pIdx) => (
+                      <div key={pIdx} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <select
+                          value={pId}
+                          onChange={(e) => handleUpdatePlayer(teamIdx, pIdx, e.target.value)}
+                          style={{ width: '100%', backgroundColor: '#ffffff', border: '1px solid #fbcfe8', borderRadius: '10px', padding: '10px', fontSize: '0.75rem', fontWeight: 700, color: '#831843', outline: 'none' }}
+                        >
+                          <option value="">Select player...</option>
+                          {players.map((p) => (
+                            <option key={p.id} value={p.id} disabled={allChosen.has(p.id) && p.id !== pId}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                        {team.players.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemovePlayerFromTeam(teamIdx, pIdx)}
+                            style={{ background: 'none', border: 'none', color: '#f472b6', fontSize: '0.875rem', fontWeight: 700, cursor: 'pointer', padding: '4px' }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
                     ))}
-                  </select>
-                  {team2Players.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveTeamPlayer(2, idx)}
-                      className="text-xs font-bold text-pink-400 hover:text-pink-600 px-1"
-                    >
-                      ✕
-                    </button>
-                  )}
+
+                    {team.players.length < 3 && (
+                      <button
+                        type="button"
+                        onClick={() => handleAddPlayerToTeam(teamIdx)}
+                        style={{ background: 'none', border: 'none', fontSize: '0.75rem', fontWeight: 700, color: '#ec4899', cursor: 'pointer', textAlign: 'left', padding: '2px 0' }}
+                      >
+                        + Add Teammate
+                      </button>
+                    )}
+                  </div>
+
+                  <div style={{ borderTop: '1px solid #fce7f3', paddingTop: '10px' }}>
+                    <label style={{ fontSize: '0.65rem', fontWeight: 700, color: '#f472b6', textTransform: 'uppercase', display: 'block', marginBottom: '4px' }}>
+                      Final Team Score
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      placeholder="e.g. 72, 4, 100"
+                      value={team.score}
+                      onChange={(e) => handleUpdateScore(teamIdx, e.target.value)}
+                      style={{ width: '100%', backgroundColor: '#ffffff', border: '1px solid #fbcfe8', borderRadius: '10px', padding: '10px', fontSize: '0.875rem', fontWeight: 700, color: '#831843', outline: 'none' }}
+                    />
+                  </div>
                 </div>
               ))}
-
-              {team2Players.length < 3 && (
-                <button
-                  type="button"
-                  onClick={() => handleAddTeamPlayer(2)}
-                  className="text-[10px] font-bold text-pink-500 hover:underline block"
-                >
-                  + Add Teammate
-                </button>
-              )}
-
-              <div>
-                <label className="text-[10px] font-bold text-pink-400 uppercase block mt-2">Team 2 Score</label>
-                <input
-                  type="number"
-                  placeholder="Score"
-                  value={team2Score}
-                  onChange={(e) => setTeam2Score(e.target.value)}
-                  className="w-full bg-white border border-pink-200 rounded-xl p-2 text-xs font-bold text-pink-800 mt-1"
-                />
-              </div>
             </div>
+
+            {teams.length < 4 && (
+              <button
+                type="button"
+                onClick={handleAddTeam}
+                style={{ width: '100%', border: '2px dashed #fbcfe8', backgroundColor: '#fdf2f8', color: '#db2777', fontWeight: 700, padding: '14px', borderRadius: '16px', cursor: 'pointer', fontSize: '0.75rem' }}
+              >
+                + Add Another Team to Match
+              </button>
+            )}
           </div>
 
           <button
             type="submit"
-            className="w-full bg-pink-500 hover:bg-pink-600 text-white font-bold py-3 rounded-2xl transition text-xs shadow-md shadow-pink-200 mt-2"
+            style={{ width: '100%', backgroundColor: '#f472b6', color: '#ffffff', fontWeight: 800, padding: '16px', borderRadius: '16px', border: 'none', cursor: 'pointer', fontSize: '0.875rem', boxShadow: '0 4px 12px rgba(244, 114, 182, 0.3)' }}
           >
-            Submit Match & Update Elo
+            Commit Match Results & Recalculate Ratings
           </button>
         </form>
 
-        {/* Recent Match Manager */}
-        <AdminMatchManager key={refreshKey} />
+        {/* Existing Match Manager section */}
+        <div style={{ backgroundColor: '#ffffff', border: '1px solid #fbcfe8', padding: '24px', borderRadius: '24px', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)' }}>
+          <AdminMatchManager key={refreshKey} />
+        </div>
+
       </div>
     </main>
   );

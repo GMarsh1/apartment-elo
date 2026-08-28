@@ -2,125 +2,172 @@
 
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import Link from 'next/link';
 
-interface HighScoreRecord {
-  gameName: string;
-  highScore: number;
-  playerName: string;
-  playerId: string;
-  createdAt: string | null;
+interface RecordItem {
+  title: string;
+  player: string;
+  stat: string;
+  description: string;
 }
 
 export default function RecordsSection() {
-  const [records, setRecords] = useState<HighScoreRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [records, setRecords] = useState<RecordItem[]>([]);
 
   useEffect(() => {
-    fetchHighScores();
+    fetchRecords();
   }, []);
 
-  async function fetchHighScores() {
+  async function fetchRecords() {
     setLoading(true);
 
-    // Fetch all scores joined with game, player, and match created_at
-    const { data: scores } = await supabase
-      .from('match_scores')
-      .select(`
-        raw_score,
-        player_id,
-        players(name),
-        matches!inner(
-          created_at,
-          games(name)
-        )
-      `);
+    try {
+      // 1. Fetch all match scores joined with player and game data
+      const { data: scores, error } = await supabase
+        .from('match_scores')
+        .select(`
+          raw_score,
+          elo_change,
+          rank,
+          players ( name ),
+          matches (
+            created_at,
+            games ( name )
+          )
+        `);
 
-    if (scores && scores.length > 0) {
-      // Group scores by game name and find the highest score for each game
-      const gameRecordsMap: Record<string, HighScoreRecord> = {};
+      if (error || !scores || scores.length === 0) {
+        setLoading(false);
+        return;
+      }
 
-      scores.forEach((s: any) => {
-        const gameName = s.matches?.games?.name || 'Unknown Game';
-        const currentScore = s.raw_score ?? 0;
+      const calculatedRecords: RecordItem[] = [];
 
-        if (!gameRecordsMap[gameName] || currentScore > gameRecordsMap[gameName].highScore) {
-          gameRecordsMap[gameName] = {
-            gameName,
-            highScore: currentScore,
-            playerName: s.players?.name || 'Unknown Player',
-            playerId: s.player_id,
-            createdAt: s.matches?.created_at || null,
-          };
+      // A. Highest Single Game Score (High Score Wins)
+      const highestScore = [...scores].sort((a, b) => Number(b.raw_score) - Number(a.raw_score))[0];
+      if (highestScore) {
+        calculatedRecords.push({
+          title: '🔥 High Score Record',
+          player: (highestScore.players as any)?.name ?? 'Unknown',
+          stat: `${highestScore.raw_score} pts`,
+          description: `Set in ${(highestScore.matches as any)?.games?.name ?? 'a game'}`,
+        });
+      }
+
+      // B. Lowest Single Game Score (e.g., Golf / Low Score Wins)
+      const lowestScore = [...scores].sort((a, b) => Number(a.raw_score) - Number(b.raw_score))[0];
+      if (lowestScore) {
+        calculatedRecords.push({
+          title: '⛳ Lowest Score Record',
+          player: (lowestScore.players as any)?.name ?? 'Unknown',
+          stat: `${lowestScore.raw_score}`,
+          description: `Set in ${(lowestScore.matches as any)?.games?.name ?? 'a game'}`,
+        });
+      }
+
+      // C. Biggest Single Match Elo Gain
+      const biggestGain = [...scores].sort((a, b) => Number(b.elo_change) - Number(a.elo_change))[0];
+      if (biggestGain && Number(biggestGain.elo_change) > 0) {
+        calculatedRecords.push({
+          title: '📈 Biggest Elo Gain',
+          player: (biggestGain.players as any)?.name ?? 'Unknown',
+          stat: `+${biggestGain.elo_change} pts`,
+          description: `Single match gain in ${(biggestGain.matches as any)?.games?.name ?? 'a match'}`,
+        });
+      }
+
+      // D. Most Matches Played / Most Wins
+      const playerWinCounts: Record<string, { name: string; wins: number; matches: number }> = {};
+      
+      scores.forEach((s) => {
+        const pName = (s.players as any)?.name ?? 'Unknown';
+        if (!playerWinCounts[pName]) {
+          playerWinCounts[pName] = { name: pName, wins: 0, matches: 0 };
+        }
+        playerWinCounts[pName].matches += 1;
+        if (s.rank === 1) {
+          playerWinCounts[pName].wins += 1;
         }
       });
 
-      setRecords(Object.values(gameRecordsMap));
-    }
+      const playerList = Object.values(playerWinCounts);
 
-    setLoading(false);
+      const mostWins = [...playerList].sort((a, b) => b.wins - a.wins)[0];
+      if (mostWins && mostWins.wins > 0) {
+        calculatedRecords.push({
+          title: '👑 Most Victorious',
+          player: mostWins.name,
+          stat: `${mostWins.wins} Wins`,
+          description: `Total 1st place finishes across all games`,
+        });
+      }
+
+      const mostMatches = [...playerList].sort((a, b) => b.matches - a.matches)[0];
+      if (mostMatches) {
+        calculatedRecords.push({
+          title: '🏋️ Most Active Player',
+          player: mostMatches.name,
+          stat: `${mostMatches.matches} Matches`,
+          description: `Most logged games in the apartment history`,
+        });
+      }
+
+      setRecords(calculatedRecords);
+    } catch (err) {
+      console.error('Error fetching records:', err);
+    } finally {
+      setLoading(false);
+    }
   }
 
   if (loading) {
     return (
-      <div className="bg-white border border-pink-200 p-6 rounded-3xl shadow-sm text-center">
-        <p className="text-xs font-bold text-pink-400 animate-pulse">Loading all-time records...</p>
+      <div style={{ textAlign: 'center', padding: '32px 0', color: '#f472b6', fontSize: '0.875rem' }}>
+        Loading record books...
+      </div>
+    );
+  }
+
+  if (records.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: '32px 16px', color: '#f472b6', fontSize: '0.875rem', backgroundColor: '#fff1f2', borderRadius: '16px', border: '1px dashed #fbcfe8' }}>
+        No match records found yet! Log some games in the Admin tab to establish apartment records.
       </div>
     );
   }
 
   return (
-    <div className="bg-white border border-pink-200 p-6 rounded-3xl shadow-sm space-y-4">
-      <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-base font-black text-pink-800">🏆 All-Time High Scores</h2>
-          <p className="text-xs text-pink-400">Record high scores for every game</p>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
+      {records.map((rec, i) => (
+        <div
+          key={i}
+          style={{
+            backgroundColor: '#ffffff',
+            border: '1px solid #fbcfe8',
+            borderRadius: '16px',
+            padding: '16px',
+            boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)',
+            display: 'flex',
+            flexDirection: 'column',
+            justify: 'space-between',
+          }}
+        >
+          <div>
+            <span style={{ fontSize: '0.75rem', fontWeight: 800, color: '#ec4899', display: 'block', marginBottom: '4px' }}>
+              {rec.title}
+            </span>
+            <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#831843' }}>
+              {rec.player}
+            </div>
+            <div style={{ fontSize: '1rem', fontWeight: 800, color: '#db2777', margin: '4px 0' }}>
+              {rec.stat}
+            </div>
+          </div>
+          <div style={{ fontSize: '0.6875rem', color: '#f472b6', marginTop: '8px', borderTop: '1px solid #fff1f2', paddingTop: '6px' }}>
+            {rec.description}
+          </div>
         </div>
-      </div>
-
-      {records.length === 0 ? (
-        <p className="text-xs text-pink-300 italic">No records logged yet.</p>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {records.map((rec, idx) => {
-            const dateObj = rec.createdAt ? new Date(rec.createdAt) : null;
-            const formattedDate = dateObj
-              ? dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-              : '';
-
-            return (
-              <div
-                key={idx}
-                className="bg-pink-50/50 border border-pink-200 p-4 rounded-2xl flex flex-col justify-between space-y-2"
-              >
-                <div className="flex justify-between items-start">
-                  <span className="font-bold text-pink-900 text-sm">{rec.gameName}</span>
-                  <span className="font-mono font-black text-xl text-pink-600 bg-pink-100 px-2.5 py-0.5 rounded-xl border border-pink-200">
-                    {rec.highScore}
-                  </span>
-                </div>
-
-                <div className="flex justify-between items-end pt-1 border-t border-pink-200/60 text-xs">
-                  <div>
-                    <span className="text-pink-400 text-[10px] uppercase font-bold block">Holder</span>
-                    <Link
-                      href={`/players/${rec.playerId}`}
-                      className="font-bold text-pink-800 hover:underline"
-                    >
-                      {rec.playerName}
-                    </Link>
-                  </div>
-                  {formattedDate && (
-                    <span className="text-[10px] text-pink-400 font-medium">
-                      {formattedDate}
-                    </span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      ))}
     </div>
   );
 }
