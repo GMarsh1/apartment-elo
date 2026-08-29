@@ -56,13 +56,54 @@ export default function Home() {
   }
 
   async function fetchLeaderboard() {
-    const { data } = await supabase
-      .from('game_ratings')
-      .select('elo, players(id, name)')
-      .eq('game_id', selectedGame)
-      .order('elo', { ascending: false });
+    if (!selectedGame) return;
 
-    if (data) setLeaderboard(data);
+    // 1. Fetch all match scores for the selected game to find everyone who played
+    const { data: scores } = await supabase
+      .from('match_scores')
+      .select('player_id, matches!inner(game_id)')
+      .eq('matches.game_id', selectedGame);
+
+    // Identify unique player IDs who have actually played this game
+    const activePlayerIds = new Set(scores?.map((s) => s.player_id) ?? []);
+
+    // 2. Fetch game ratings for the selected game
+    const { data: ratings } = await supabase
+      .from('game_ratings')
+      .select('elo, player_id, players(id, name)')
+      .eq('game_id', selectedGame);
+
+    // 3. Fetch all players as fallback
+    const { data: allPlayers } = await supabase
+      .from('players')
+      .select('id, name, elo');
+
+    if (!allPlayers) return;
+
+    // Map existing ratings by player ID
+    const ratingMap = new Map<string, { elo: number; name: string }>();
+    ratings?.forEach((r) => {
+      if (r.players) {
+        ratingMap.set(r.player_id, { elo: r.elo, name: r.players.name });
+      }
+    });
+
+    // Build leaderboard including everyone who played this game (or has a rating record for it)
+    const combinedLeaderboard = allPlayers
+      .filter((p) => activePlayerIds.has(p.id) || ratingMap.has(p.id))
+      .map((p) => {
+        const ratingRecord = ratingMap.get(p.id);
+        return {
+          players: {
+            id: p.id,
+            name: p.name,
+          },
+          elo: ratingRecord ? ratingRecord.elo : (p.elo ?? 1000),
+        };
+      })
+      .sort((a, b) => b.elo - a.elo);
+
+    setLeaderboard(combinedLeaderboard);
   }
 
   async function fetchRecentMatches() {
