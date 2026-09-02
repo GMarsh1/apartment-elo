@@ -17,6 +17,7 @@ export default function AdminPage() {
   const [selectedGame, setSelectedGame] = useState<string>('');
   const [scoringType, setScoringType] = useState<ScoringType>('high_score_wins');
   const [refreshKey, setRefreshKey] = useState<number>(0);
+  const [isRecalculating, setIsRecalculating] = useState<boolean>(false);
 
   const [newGameName, setNewGameName] = useState<string>('');
   const [newPlayerName, setNewPlayerName] = useState<string>('');
@@ -46,6 +47,140 @@ export default function AdminPage() {
           { players: [p[1].id], score: '' },
         ]);
       }
+    }
+  }
+
+  /**
+   * STEP 1 IMPLEMENTATION: Recalculate Elo History
+   * Re-evaluates all matches for a game in chronological order from scratch
+   * and updates `match_scores`, `game_ratings`, and global `players.matches_played`.
+   */
+  async function recalculateGameHistory(gameId: string) {
+    setIsRecalculating(true);
+    try {
+      // 1. Fetch all matches for the game ordered chronologically by creation date
+      const { data: matches, error: matchesErr } = await supabase
+        .from('matches')
+        .select(`
+          id,
+          created_at,
+          scoring_type,
+          match_scores (
+            id,
+            player_id,
+            team_id,
+            raw_score,
+            rank
+          )
+        `)
+        .eq('game_id', gameId)
+        .order('created_at', { ascending: true });
+
+      if (matchesErr) throw matchesErr;
+
+      // Track running state for game-specific Elo & match count
+      const runningGameElo = new Map<string, number>();
+      const runningGameMatches = new Map<string, number>();
+
+      const scoreUpdates: { id: string; elo_change: number }[] = [];
+
+      // 2. Iterate through each match sequentially and compute Elo changes
+      for (const match of matches || []) {
+        const scores = match.match_scores || [];
+        if (scores.length === 0) continue;
+
+        // Group players into teams based on team_id
+        const teamMap = new Map<number, { playerIds: string[]; rawScore: number }>();
+
+        scores.forEach((s: any) => {
+          const tId = s.team_id ?? 1;
+          if (!teamMap.has(tId)) {
+            teamMap.set(tId, { playerIds: [], rawScore: Number(s.raw_score) });
+          }
+          teamMap.get(tId)!.playerIds.push(s.player_id);
+        });
+
+        const eloInputs: TeamInput[] = Array.from(teamMap.entries()).map(([tId, tData]) => ({
+          id: tId,
+          playerIds: tData.playerIds,
+          rawScore: tData.rawScore,
+        }));
+
+        // Determine scoring mechanic used for this match
+        const mScoringType: ScoringType = match.scoring_type || scoringType;
+
+        // Compute dynamic Elo using running maps
+        const calculated = calculateEloChanges(eloInputs, mScoringType, runningGameElo, runningGameMatches);
+        const results = Array.isArray(calculated) ? calculated : Object.values(calculated);
+
+        // Map team results back to score entries and update running states
+        results.forEach((res: any, idx: number) => {
+          const teamData = eloInputs[idx];
+          if (!teamData) return;
+
+          const eloChange = res.eloChangePerPlayer ?? 0;
+
+          teamData.playerIds.forEach((pId) => {
+            const currentElo = runningGameElo.get(pId) ?? 1000;
+            const currentMatches = runningGameMatches.get(pId) ?? 0;
+
+            runningGameElo.set(pId, Math.round(currentElo + eloChange));
+            runningGameMatches.set(pId, currentMatches + 1);
+
+            const scoreRecord = scores.find((s: any) => s.player_id === pId);
+            if (scoreRecord) {
+              scoreUpdates.push({
+                id: scoreRecord.id,
+                elo_change: eloChange,
+              });
+            }
+          });
+        });
+      }
+
+      // 3. Batch update match_scores elo_change records
+      for (const update of scoreUpdates) {
+        await supabase
+          .from('match_scores')
+          .update({ elo_change: update.elo_change })
+          .eq('id', update.id);
+      }
+
+      // 4. Update current ratings in game_ratings table
+      for (const [pId, elo] of Array.from(runningGameElo.entries())) {
+        const mCount = runningGameMatches.get(pId) ?? 0;
+        await supabase
+          .from('game_ratings')
+          .upsert(
+            {
+              player_id: pId,
+              game_id: gameId,
+              elo: elo,
+              matches_played: mCount,
+            },
+            { onConflict: 'player_id,game_id' }
+          );
+      }
+
+      // 5. Recalculate global matches_played for all players across all games
+      const { data: allMatchScores } = await supabase.from('match_scores').select('player_id');
+      if (allMatchScores) {
+        const globalMatchCounts = new Map<string, number>();
+        allMatchScores.forEach((ms) => {
+          globalMatchCounts.set(ms.player_id, (globalMatchCounts.get(ms.player_id) || 0) + 1);
+        });
+
+        for (const [pId, count] of Array.from(globalMatchCounts.entries())) {
+          await supabase.from('players').update({ matches_played: count }).eq('id', pId);
+        }
+      }
+
+      fetchData();
+      setRefreshKey((prev) => prev + 1);
+    } catch (err: any) {
+      alert('Error recalculating Elo history: ' + err.message);
+    } finally {
+      setIsRecalculating(false);
     }
   }
 
@@ -165,7 +300,7 @@ export default function AdminPage() {
       gameRatingData?.map((gr) => [gr.player_id, gr.matches_played ?? 0]) ?? []
     );
 
-    // B. Build lookup maps (Prefer game_ratings Elo over global player Elo)
+    // B. Build lookup maps
     const ratingMap = new Map<string, number>(
       playerData.map((p) => [
         p.id,
@@ -189,10 +324,10 @@ export default function AdminPage() {
     const calculated = calculateEloChanges(eloInputs, scoringType, ratingMap, matchCountMap);
     const results = Array.isArray(calculated) ? calculated : Object.values(calculated);
 
-    // D. Insert match record
+    // D. Insert match record (storing scoring_type for historical recalculation)
     const { data: matchData, error: matchError } = await supabase
       .from('matches')
-      .insert([{ game_id: selectedGame }])
+      .insert([{ game_id: selectedGame, scoring_type: scoringType }])
       .select()
       .single();
 
@@ -212,7 +347,7 @@ export default function AdminPage() {
 
       team.players.forEach((playerId) => {
         const eloChange = res.eloChangePerPlayer ?? 0;
-        
+
         scoresToInsert.push({
           match_id: matchData.id,
           player_id: playerId,
@@ -245,15 +380,14 @@ export default function AdminPage() {
 
     // E. Update game_ratings and global player match counts
     for (const [pId, updates] of Array.from(playerUpdatesMap.entries())) {
-      // 1. Save new Elo into game_ratings
       const { error: grError } = await supabase
         .from('game_ratings')
         .upsert(
-          { 
-            player_id: pId, 
-            game_id: selectedGame, 
+          {
+            player_id: pId,
+            game_id: selectedGame,
             elo: updates.elo,
-            matches_played: updates.gameMatches 
+            matches_played: updates.gameMatches,
           },
           { onConflict: 'player_id,game_id' }
         );
@@ -263,7 +397,6 @@ export default function AdminPage() {
         return;
       }
 
-      // 2. Increment global match count in players table
       const { error: updateError } = await supabase
         .from('players')
         .update({
@@ -288,7 +421,7 @@ export default function AdminPage() {
   return (
     <main style={{ minHeight: '100vh', backgroundColor: '#fff1f2', color: '#831843', padding: '16px', fontFamily: 'system-ui, sans-serif' }}>
       <div style={{ maxWidth: '768px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
-        
+
         {/* Navigation & Header */}
         <div style={{ backgroundColor: '#ffffff', padding: '20px', borderRadius: '24px', border: '1px solid #fbcfe8', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.08)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
@@ -300,14 +433,36 @@ export default function AdminPage() {
             </h1>
             <p style={{ fontSize: '0.75rem', color: '#f472b6', margin: '2px 0 0 0' }}>Configure your roster, register categories, and submit live match results.</p>
           </div>
-          <div style={{ backgroundColor: '#fdf2f8', border: '1px solid #fbcfe8', padding: '6px 12px', borderRadius: '12px', color: '#db2777', fontSize: '0.75rem', fontWeight: 700 }}>
-            System Active
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+            <div style={{ backgroundColor: '#fdf2f8', border: '1px solid #fbcfe8', padding: '6px 12px', borderRadius: '12px', color: '#db2777', fontSize: '0.75rem', fontWeight: 700 }}>
+              System Active
+            </div>
+            {selectedGame && (
+              <button
+                type="button"
+                onClick={() => recalculateGameHistory(selectedGame)}
+                disabled={isRecalculating}
+                style={{
+                  backgroundColor: isRecalculating ? '#fbcfe8' : '#be185d',
+                  color: '#ffffff',
+                  fontSize: '0.7rem',
+                  fontWeight: 700,
+                  padding: '6px 12px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  cursor: isRecalculating ? 'not-allowed' : 'pointer',
+                  boxShadow: '0 2px 6px rgba(190, 24, 93, 0.2)',
+                }}
+              >
+                {isRecalculating ? 'Recalculating...' : '🔄 Recalculate Game Elo History'}
+              </button>
+            )}
           </div>
         </div>
 
         {/* Setup Grid: Add Games & Players */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-          
+
           <form onSubmit={handleAddGame} style={{ backgroundColor: '#ffffff', border: '1px solid #fbcfe8', padding: '20px', borderRadius: '24px', display: 'flex', flexDirection: 'column', gap: '12px', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)' }}>
             <div>
               <span style={{ fontSize: '0.65rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#ec4899', backgroundColor: '#fdf2f8', padding: '2px 6px', borderRadius: '6px' }}>Catalog</span>
@@ -486,9 +641,12 @@ export default function AdminPage() {
           </button>
         </form>
 
-        {/* Existing Match Manager section */}
+        {/* Existing Match Manager section with recalculation callback */}
         <div style={{ backgroundColor: '#ffffff', border: '1px solid #fbcfe8', padding: '24px', borderRadius: '24px', boxShadow: '0 2px 8px rgba(244, 114, 182, 0.05)' }}>
-          <AdminMatchManager key={refreshKey} />
+          <AdminMatchManager 
+            key={refreshKey} 
+            onMatchMutated={() => recalculateGameHistory(selectedGame)} 
+          />
         </div>
 
       </div>
