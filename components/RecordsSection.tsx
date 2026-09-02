@@ -22,7 +22,6 @@ export default function RecordsSection() {
     setLoading(true);
 
     try {
-      // 1. Fetch all match scores joined with player and game data
       const { data: scores, error } = await supabase
         .from('match_scores')
         .select(`
@@ -43,7 +42,6 @@ export default function RecordsSection() {
 
       const calculatedRecords: RecordItem[] = [];
 
-      // A. Highest Single Game Score (High Score Wins)
       const highestScore = [...scores].sort((a, b) => Number(b.raw_score) - Number(a.raw_score))[0];
       if (highestScore) {
         calculatedRecords.push({
@@ -54,7 +52,6 @@ export default function RecordsSection() {
         });
       }
 
-      // B. Lowest Single Game Score (e.g., Golf / Low Score Wins)
       const lowestScore = [...scores].sort((a, b) => Number(a.raw_score) - Number(b.raw_score))[0];
       if (lowestScore) {
         calculatedRecords.push({
@@ -65,7 +62,6 @@ export default function RecordsSection() {
         });
       }
 
-      // C. Biggest Single Match Elo Gain
       const biggestGain = [...scores].sort((a, b) => Number(b.elo_change) - Number(a.elo_change))[0];
       if (biggestGain && Number(biggestGain.elo_change) > 0) {
         calculatedRecords.push({
@@ -76,7 +72,6 @@ export default function RecordsSection() {
         });
       }
 
-      // D. Most Matches Played / Most Wins
       const playerWinCounts: Record<string, { name: string; wins: number; matches: number }> = {};
       
       scores.forEach((s) => {

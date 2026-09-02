@@ -140,7 +140,7 @@ export default function AdminPage() {
       return;
     }
 
-    // A. Fetch current ratings & matches_played for all participating players
+    // A. Fetch current global stats from players
     const { data: playerData, error: pError } = await supabase
       .from('players')
       .select('id, elo, matches_played')
@@ -151,9 +151,33 @@ export default function AdminPage() {
       return;
     }
 
-    // B. Build lookup maps
-    const ratingMap = new Map<string, number>(playerData.map((p) => [p.id, p.elo ?? 1000]));
-    const matchCountMap = new Map<string, number>(playerData.map((p) => [p.id, p.matches_played ?? 0]));
+    // A2. Fetch game-specific ratings from game_ratings
+    const { data: gameRatingData } = await supabase
+      .from('game_ratings')
+      .select('player_id, elo, matches_played')
+      .eq('game_id', selectedGame)
+      .in('player_id', allPlayerIds);
+
+    const gameEloMap = new Map<string, number>(
+      gameRatingData?.map((gr) => [gr.player_id, gr.elo]) ?? []
+    );
+    const gameMatchesMap = new Map<string, number>(
+      gameRatingData?.map((gr) => [gr.player_id, gr.matches_played ?? 0]) ?? []
+    );
+
+    // B. Build lookup maps (Prefer game_ratings Elo over global player Elo)
+    const ratingMap = new Map<string, number>(
+      playerData.map((p) => [
+        p.id,
+        gameEloMap.has(p.id) ? gameEloMap.get(p.id)! : (p.elo ?? 1000),
+      ])
+    );
+    const matchCountMap = new Map<string, number>(
+      playerData.map((p) => [
+        p.id,
+        gameMatchesMap.has(p.id) ? gameMatchesMap.get(p.id)! : (p.matches_played ?? 0),
+      ])
+    );
 
     const eloInputs: TeamInput[] = activeTeams.map((t, idx) => ({
       id: idx,
@@ -161,7 +185,7 @@ export default function AdminPage() {
       rawScore: t.score,
     }));
 
-    // C. Calculate dynamic Elo changes passing match counts
+    // C. Calculate dynamic Elo changes
     const calculated = calculateEloChanges(eloInputs, scoringType, ratingMap, matchCountMap);
     const results = Array.isArray(calculated) ? calculated : Object.values(calculated);
 
@@ -178,7 +202,7 @@ export default function AdminPage() {
     }
 
     const scoresToInsert: any[] = [];
-    const playerUpdatesMap = new Map<string, { elo: number; matches_played: number }>();
+    const playerUpdatesMap = new Map<string, { elo: number; gameMatches: number; globalMatches: number }>();
 
     results.forEach((res: any, teamIdx: number) => {
       const team = activeTeams[teamIdx];
@@ -187,48 +211,73 @@ export default function AdminPage() {
       const currentTeamId = Number(teamIdx + 1);
 
       team.players.forEach((playerId) => {
+        const eloChange = res.eloChangePerPlayer ?? 0;
+        
         scoresToInsert.push({
           match_id: matchData.id,
           player_id: playerId,
           rank: res.rank ?? 1,
           raw_score: res.rawScore ?? team.score,
-          elo_change: res.eloChangePerPlayer ?? 0,
+          elo_change: eloChange,
           team_id: currentTeamId,
         });
 
         const currentElo = ratingMap.get(playerId) ?? 1000;
-        const currentMatches = matchCountMap.get(playerId) ?? 0;
+        const currentGameMatches = gameMatchesMap.get(playerId) ?? 0;
+        const currentGlobalMatches = playerData.find((p) => p.id === playerId)?.matches_played ?? 0;
+
+        const updatedElo = Math.round(currentElo + eloChange);
 
         playerUpdatesMap.set(playerId, {
-          elo: currentElo + (res.eloChangePerPlayer ?? 0),
-          matches_played: currentMatches + 1,
+          elo: updatedElo,
+          gameMatches: currentGameMatches + 1,
+          globalMatches: currentGlobalMatches + 1,
         });
       });
     });
 
+    // Save match scores to match_scores
     const { error: scoreError } = await supabase.from('match_scores').insert(scoresToInsert);
     if (scoreError) {
       alert('Error saving match scores: ' + scoreError.message);
       return;
     }
 
-    // E. Update each player's Elo rating AND increment matches_played count
+    // E. Update game_ratings and global player match counts
     for (const [pId, updates] of Array.from(playerUpdatesMap.entries())) {
+      // 1. Save new Elo into game_ratings
+      const { error: grError } = await supabase
+        .from('game_ratings')
+        .upsert(
+          { 
+            player_id: pId, 
+            game_id: selectedGame, 
+            elo: updates.elo,
+            matches_played: updates.gameMatches 
+          },
+          { onConflict: 'player_id,game_id' }
+        );
+
+      if (grError) {
+        alert(`Error updating game rating for player ${pId}: ` + grError.message);
+        return;
+      }
+
+      // 2. Increment global match count in players table
       const { error: updateError } = await supabase
         .from('players')
         .update({
-          elo: updates.elo,
-          matches_played: updates.matches_played,
+          matches_played: updates.globalMatches,
         })
         .eq('id', pId);
 
       if (updateError) {
-        alert(`Error updating player stats for ${pId}: ` + updateError.message);
+        alert(`Error updating global player stats for ${pId}: ` + updateError.message);
         return;
       }
     }
 
-    alert('Match logged successfully! Ratings updated and matches played incremented.');
+    alert('Match logged successfully! Ratings updated in game_ratings.');
 
     setTeams(teams.map((t) => ({ ...t, score: '' })));
     setRefreshKey((prev) => prev + 1);
